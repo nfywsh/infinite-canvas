@@ -2738,6 +2738,117 @@ function InfiniteCanvasPage() {
         generateNodeRef.current = handleGenerateNode;
     }, [handleGenerateNode]);
 
+    const handleRegenerateNode = useCallback(
+        async (node: CanvasNodeData, imageId?: string) => {
+            if (node.type === CanvasNodeType.Video) {
+                if (!node.metadata?.content) return;
+                const videoSourceNode = findRetrySourceNode(node.id, nodesRef.current, connectionsRef.current) || node;
+                const videoConfig = buildGenerationConfig(effectiveConfig, videoSourceNode, "video");
+                if (!isAiConfigReady(videoConfig, videoConfig.model)) {
+                    openConfigDialog(true);
+                    return;
+                }
+                // 与图片「重新生成」同语义：只取上游连线 / @ 引用，刻意不并入本节点已有视频
+                const videoContext = await hydrateNodeGenerationContext(buildNodeGenerationContext(videoSourceNode.id, nodesRef.current, connectionsRef.current, node.metadata?.prompt || ""));
+                const videoPrompt = videoContext.prompt.trim();
+                if (!videoPrompt) {
+                    message.warning(t("canvas.projectPage.retryPromptMissing"));
+                    return;
+                }
+                setRunningNodeId(node.id);
+                setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_LOADING, errorDetails: undefined, videoTaskId: undefined } } : item)));
+                const videoController = startGenerationRequest(node.id, videoSourceNode.id, node.id);
+                try {
+                    await completeVideoNodeTask(node.id, videoConfig, videoPrompt, videoContext.referenceImages, videoController.signal, {
+                        size: videoConfig.size,
+                        seconds: videoConfig.videoSeconds,
+                        vquality: videoConfig.vquality,
+                        generateAudio: videoConfig.videoGenerateAudio,
+                        watermark: videoConfig.videoWatermark,
+                        videoMode: videoConfig.videoMode,
+                        references: generationReferenceUrls(videoContext),
+                    }, videoContext.referenceVideos, videoContext.referenceAudios);
+                } catch (error) {
+                    if (!isGenerationCanceled(error)) {
+                        const videoError = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");
+                        message.error(videoError);
+                        setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails: videoError } } : item)));
+                    }
+                } finally {
+                    finishGenerationRequest(node.id, videoController);
+                    setRunningNodeId(null);
+                }
+                return;
+            }
+            if (node.type !== CanvasNodeType.Image || !node.metadata?.content) return;
+            const sourceNode = findRetrySourceNode(node.id, nodesRef.current, connectionsRef.current) || node;
+            const generationConfig = buildGenerationConfig(effectiveConfig, sourceNode, "image");
+            if (!isAiConfigReady(generationConfig, generationConfig.model)) {
+                openConfigDialog(true);
+                return;
+            }
+            // 关键：只取“上游连线 / @ 引用”的参考图，刻意不并入本节点已有图片 → 等同按当前提示词重新生成
+            const context = await hydrateNodeGenerationContext(buildNodeGenerationContext(sourceNode.id, nodesRef.current, connectionsRef.current, node.metadata?.prompt || ""));
+            const prompt = context.prompt.trim();
+            if (!prompt) {
+                message.warning(t("canvas.projectPage.retryPromptMissing"));
+                return;
+            }
+            const referenceImages = context.referenceImages;
+            const useReferenceImages = referenceImages.length > 0;
+            setRunningNodeId(node.id);
+            setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_LOADING, errorDetails: undefined } } : item)));
+            const controller = startGenerationRequest(node.id, sourceNode.id, node.id);
+            try {
+                const generatedItems = useReferenceImages
+                    ? await requestEdit(generationConfig, prompt, referenceImages, { signal: controller.signal })
+                    : await requestGeneration(generationConfig, prompt, { signal: controller.signal });
+                const uploadedImages: Awaited<ReturnType<typeof uploadImage>>[] = [];
+                for (const item of generatedItems) {
+                    uploadedImages.push(await uploadImage(item.dataUrl, { signal: controller.signal }));
+                }
+                const firstId = imageId || node.metadata?.primaryImageId || nanoid();
+                const nextImages: CanvasNodeImage[] = uploadedImages.map((uploadedImage, index) => ({
+                    id: index === 0 ? firstId : nanoid(),
+                    status: NODE_STATUS_SUCCESS,
+                    content: uploadedImage.url,
+                    storageKey: uploadedImage.storageKey,
+                    naturalWidth: uploadedImage.width,
+                    naturalHeight: uploadedImage.height,
+                    bytes: uploadedImage.bytes,
+                    mimeType: uploadedImage.mimeType,
+                }));
+                setNodes((prev) =>
+                    prev.map((item) => {
+                        if (item.id !== node.id) return item;
+                        return {
+                            ...item,
+                            type: CanvasNodeType.Image,
+                            metadata: {
+                                ...item.metadata,
+                                ...imageMetadata(uploadedImages[0]),
+                                images: nextImages,
+                                primaryImageId: nextImages[0].id,
+                                count: nextImages.length,
+                                prompt,
+                                ...buildImageGenerationMetadata(useReferenceImages ? "edit" : "generation", generationConfig, nextImages.length, referenceImages),
+                            },
+                        };
+                    }),
+                );
+            } catch (error) {
+                if (isGenerationCanceled(error)) return;
+                const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");
+                message.error(errorDetails);
+                setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_SUCCESS, errorDetails } } : item)));
+            } finally {
+                finishGenerationRequest(node.id, controller);
+                setRunningNodeId(null);
+            }
+        },
+        [effectiveConfig, finishGenerationRequest, isAiConfigReady, message, openConfigDialog, startGenerationRequest, t],
+    );
+
     const handleRetryNode = useCallback(
         async (node: CanvasNodeData, imageId?: string) => {
             if (hasResumableVideoTask(node)) {
@@ -3273,6 +3384,7 @@ function InfiniteCanvasPage() {
                     onViewImage={handleNodeViewImage}
                     onReversePrompt={createImageReversePromptNodes}
                     onRetry={(node) => void handleRetryNode(node)}
+                    onRegenerate={(node) => void handleRegenerateNode(node)}
                     onToggleFreeResize={(node) => toggleNodeFreeResize(node.id)}
                     onDelete={(node) => deleteNodes(new Set([node.id]))}
                     onUngroup={(node) => ungroupSelection(new Set([node.id]))}
