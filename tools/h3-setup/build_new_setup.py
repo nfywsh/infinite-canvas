@@ -96,9 +96,10 @@ if (ov.int) { const n = parseInt(ov.int, 10); if (n >= 0) intId = n; }
 if (ov.seconds) { const n = parseFloat(ov.seconds); if (n >= 4 && n <= 15) secs = n; }
 if (ov.seed && /^\d+$/.test(ov.seed)) seed = parseInt(ov.seed, 10);
 const numFrames = Math.max(4 * FPS, Math.min(15 * FPS, Math.round(secs * FPS))); let refEdge = /省流/.test(model) ? 1024 : 0; if (ov.refedge) { var _re = parseInt(ov.refedge, 10); if (_re >= 512 && _re <= 2048) refEdge = _re; }
+const bsa = /BSA/.test(model) ? 0.5 : 0;
 const g = {};
 """ + UPIMG + r"""
-const node = { class_type: 'VllmOmniH3', inputs: { prompt: clean, task: task, server_url: SVR, width: w, height: h, num_frames: numFrames, fps: FPS, seed: seed, steps: steps, lora_file: '', lora_scale: loraScale, int_id: intId, flow_shift: flowShift, aspect_ratio: (w >= h ? '16:9' : '9:16'), reference_short_edge: refEdge } };
+const node = { class_type: 'VllmOmniH3', inputs: { prompt: clean, task: task, server_url: SVR, width: w, height: h, num_frames: numFrames, fps: FPS, seed: seed, steps: steps, lora_file: '', lora_scale: loraScale, int_id: intId, flow_shift: flowShift, aspect_ratio: (w >= h ? '16:9' : '9:16'), reference_short_edge: refEdge, bsa_sparsity: bsa } };
 g['200'] = node;
 if (isI2V) {
   if (!__imgs.length) throw new Error('图生视频需要至少 1 张图片（画布上选中图片作首帧）');
@@ -154,9 +155,10 @@ if (ov.int) { const n = parseInt(ov.int, 10); if (n >= 0) intId = n; }
 if (ov.seconds) { const n = parseFloat(ov.seconds); if (n >= 4 && n <= 15) secs = n; }
 if (ov.seed && /^\d+$/.test(ov.seed)) seed = parseInt(ov.seed, 10);
 const numFrames = Math.max(4 * FPS, Math.min(15 * FPS, Math.round(secs * FPS))); let refEdge = /省流/.test(model) ? 1024 : 0; if (ov.refedge) { var _re = parseInt(ov.refedge, 10); if (_re >= 512 && _re <= 2048) refEdge = _re; }
+const bsa = /BSA/.test(model) ? 0.5 : 0;
 const g = {};
 """ + UPIMG + r"""
-const node = { class_type: 'VllmOmniH3', inputs: { prompt: clean, task: task, server_url: SVR, width: w, height: h, num_frames: numFrames, fps: FPS, seed: seed, steps: steps, lora_file: LORA[task], lora_scale: loraScale, int_id: intId, flow_shift: flowShift, aspect_ratio: (w >= h ? '16:9' : '9:16'), reference_short_edge: refEdge } };
+const node = { class_type: 'VllmOmniH3', inputs: { prompt: clean, task: task, server_url: SVR, width: w, height: h, num_frames: numFrames, fps: FPS, seed: seed, steps: steps, lora_file: LORA[task], lora_scale: loraScale, int_id: intId, flow_shift: flowShift, aspect_ratio: (w >= h ? '16:9' : '9:16'), reference_short_edge: refEdge, bsa_sparsity: bsa } };
 g['200'] = node;
 if (isI2V) {
   if (!__imgs.length) throw new Error('图生视频需要至少 1 张图片（画布上选中图片作首帧）');
@@ -590,6 +592,10 @@ window.runWorkflowsImport = function () {
   upsert(H3, "H3文生视频·vllm版·LoRA加速", "video", S.vllm_lora);
   upsert(H3, "H3图生视频·vllm版·LoRA加速", "video", S.vllm_lora);
   upsert(H3, "H3参考生视频·vllm版·LoRA加速", "video", S.vllm_lora); upsert(H3, "H3参考生视频·vllm版·LoRA加速·省流", "video", S.vllm_lora);
+  // BSA 版：同一脚本，只有名称带 BSA 的渠道才打开块稀疏（默认关闭）
+  upsert(H3, "H3文生视频·vllm版·LoRA加速·BSA", "video", S.vllm_lora);
+  upsert(H3, "H3图生视频·vllm版·LoRA加速·BSA", "video", S.vllm_lora);
+  upsert(H3, "H3参考生视频·vllm版·LoRA加速·BSA", "video", S.vllm_lora); upsert(H3, "H3参考生视频·vllm版·LoRA加速·省流·BSA", "video", S.vllm_lora);
   upsert(H3, "SeedVR2图片超分·3B", "image", S.sr_img);
   upsert(H3, "SeedVR2图片超分·7B", "image", S.sr_img);
   upsert(H3, "SeedVR2视频超分·3B", "video", S.sr_vid);
