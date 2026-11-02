@@ -5,7 +5,7 @@ import { useTranslation } from "react-i18next";
 import i18n from "@/i18n";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import { modelOptionLabel, modelOptionName, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
+import { modelOptionLabel, modelOptionName, resolveModelScript, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
 
 type ModelPickerProps = {
     config: AiConfig;
@@ -61,7 +61,7 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
             </SelectTrigger>
             <SelectContent
                 data-canvas-no-zoom
-                className="z-[1200] w-80 max-w-[calc(100vw-24px)] rounded-xl border border-border/70 bg-popover p-1 shadow-xl"
+                className="z-[1200] w-max min-w-[20rem] max-w-[min(680px,calc(100vw-24px))] rounded-xl border border-border/70 bg-popover p-1 shadow-xl"
                 position="popper"
                 align="start"
                 side="bottom"
@@ -71,8 +71,13 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
             >
                 {options.length ? (
                     options.map((model) => (
-                        <SelectItem key={model} value={model} textValue={modelOptionLabel(config, model)}>
-                            <ModelLabel config={config} model={model} />
+                        <SelectItem
+                            key={model}
+                            value={model}
+                            textValue={modelOptionLabel(config, model)}
+                            className="data-[state=checked]:bg-sky-500/15 data-[state=checked]:font-medium data-[state=checked]:text-sky-700 data-[state=checked]:ring-1 data-[state=checked]:ring-sky-500/40 data-[state=checked]:ring-inset dark:data-[state=checked]:text-sky-300"
+                        >
+                            <ModelLabel config={config} model={model} capability={capability} />
                         </SelectItem>
                     ))
                 ) : (
@@ -91,11 +96,30 @@ function emptyModelLabel(config: AiConfig, capability?: ModelCapability) {
     return config.models.length ? i18n.t("settingsPanels.model.noMatch", { capability: label }) : i18n.t("settingsPanels.model.addFirst");
 }
 
-function ModelLabel({ config, model }: { config: AiConfig; model: string }) {
+function ModelLabel({ config, model, capability }: { config: AiConfig; model: string; capability?: ModelCapability }) {
     return (
         <span className="flex min-w-0 items-center gap-2">
             <ModelIcon model={model} />
-            <span className="truncate">{modelOptionLabel(config, model)}</span>
+            <span className="whitespace-nowrap">{modelOptionLabel(config, model)}</span>
+            <ReferenceBadge config={config} model={model} capability={capability} />
+        </span>
+    );
+}
+
+/** 生图渠道标注：脚本里有 LoadImage/VAEEncode 才真正吃参考图，否则只是纯文生图。 */
+function ReferenceBadge({ config, model, capability }: { config: AiConfig; model: string; capability?: ModelCapability }) {
+    if (capability !== "image") return null;
+    const script = resolveModelScript(config, model);
+    if (!script) return null;
+    const supportsReference = /LoadImage|VAEEncode/.test(script);
+    return (
+        <span
+            className={cn(
+                "shrink-0 rounded px-1 py-px text-[10px] font-normal leading-4",
+                supportsReference ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-300" : "bg-muted text-muted-foreground",
+            )}
+        >
+            {supportsReference ? "文生图/图生图" : "仅文生图"}
         </span>
     );
 }

@@ -351,7 +351,8 @@ g['16'] = { class_type: 'VAEDecode', inputs: { samples: ['13', 0], vae: ['3', 0]
 g['17'] = { class_type: 'SaveImage', inputs: { filename_prefix: 'canvas_f2', images: ['16', 0] } };
 """ + IMAGE_TAIL)
 
-FLUX3 = (r"""// FLUX.3 Image Klein 文生图（抽卡）。klein=蒸馏(16步/cfg1)；klein-base=未蒸馏(50步/cfg3.5)。
+FLUX3 = (r"""// FLUX.3 Image Klein 文生图 / 图生图（参考图经 ReferenceLatent 注入 conditioning，最多 4 张）。
+// klein=蒸馏(16步/cfg1)；klein-base=未蒸馏(50步/cfg3.5)。
 // 关键：int8 注意力(comfy_kitchen sage)在沐曦 MACA 报 "CUDA driver version is insufficient"，
 // 必须挂 PatchFlashAttentionKJ 强制走 flash attention（否则 base 必崩）。
 // 尺寸动态传入：size(WxH 或 比例) > resolution > ratio，默认 1024x1024；r16 上限 3840。
@@ -372,6 +373,7 @@ const cfg = isBase ? 3.5 : 1.0;
 let clean = String(prompt || '');
 const sm = /\[steps\s*[=:]\s*(\d+)\]/i.exec(clean); if (sm) { const v = parseInt(sm[1], 10); if (v > 0 && v <= 60) { steps = v; clean = clean.replace(sm[0], '').trim(); } }
 const seed = Math.floor(Math.random() * 1e15);
+""" + UPIMG + r"""const refs = __imgs.slice(0, 4);
 const g = {};
 g['1'] = { class_type: 'UNETLoader', inputs: { unet_name: UNET, weight_dtype: 'default' } };
 g['10'] = { class_type: 'PatchFlashAttentionKJ', inputs: { model: ['1', 0], allow_compile: false } };
@@ -380,7 +382,17 @@ g['3'] = { class_type: 'VAELoader', inputs: { vae_name: 'flux2-vae.safetensors' 
 g['4'] = { class_type: 'CLIPTextEncode', inputs: { text: clean, clip: ['2', 0] } };
 g['5'] = { class_type: 'CLIPTextEncode', inputs: { text: '', clip: ['2', 0] } };
 g['6'] = { class_type: 'EmptyFlux2LatentImage', inputs: { width: w, height: h, batch_size: n } };
-g['7'] = { class_type: 'KSampler', inputs: { model: ['10', 0], positive: ['4', 0], negative: ['5', 0], latent_image: ['6', 0], seed: seed, steps: steps, cfg: cfg, sampler_name: 'euler', scheduler: 'simple', denoise: 1.0 } };
+let condRef = ['4', 0];
+for (let i = 0; i < refs.length; i++) {
+  const nm = await upImg(refs[i], 'canvas_f3_ref_' + i + '.png');
+  const b = 300 + i * 4;
+  g[String(b)] = { class_type: 'LoadImage', inputs: { image: nm } };
+  g[String(b + 1)] = { class_type: 'FluxKontextImageScale', inputs: { image: [String(b), 0] } };
+  g[String(b + 2)] = { class_type: 'VAEEncode', inputs: { pixels: [String(b + 1), 0], vae: ['3', 0] } };
+  g[String(b + 3)] = { class_type: 'ReferenceLatent', inputs: { conditioning: condRef, latent: [String(b + 2), 0] } };
+  condRef = [String(b + 3), 0];
+}
+g['7'] = { class_type: 'KSampler', inputs: { model: ['10', 0], positive: condRef, negative: ['5', 0], latent_image: ['6', 0], seed: seed, steps: steps, cfg: cfg, sampler_name: 'euler', scheduler: 'simple', denoise: 1.0 } };
 g['8'] = { class_type: 'VAEDecode', inputs: { samples: ['7', 0], vae: ['3', 0] } };
 g['9'] = { class_type: 'SaveImage', inputs: { images: ['8', 0], filename_prefix: 'canvas_f3' } };
 """ + IMAGE_TAIL)
@@ -535,6 +547,115 @@ g['14'] = { class_type: 'VAEDecode', inputs: { samples: ['22', 0], vae: ['3', 0]
 g['15'] = { class_type: 'SaveImage', inputs: { images: ['14', 0], filename_prefix: 'canvas_qw21t' } };
 """ + IMAGE_TAIL)
 
+REGEN2K = r"""// Open-H3 Regenerate 2K 精修（非官方）：H3 768P 草稿 → 2560x1440，3 步 sigma 重绘
+// 输入：params.videoUrl / params.video（草稿视频 URL，同源 /h3/<token>/view?... 也可），
+//       或 params.videoFile（已存在于 ComfyUI input 目录的文件名），或提示词里直接写视频 URL/文件名
+// 说明：草稿必须是 H3 原生长度（124 帧）；非原生长度 VAE 往返会掉帧
+// 参数：prompt/params.prompt 作为这段视频的内容描述；内联 [target=2560x1440] [chunk=8192] [heads=8] 可覆盖
+const base = (baseUrl || '').replace(/\/+$/, '');
+const p = params || {};
+let clean = String(prompt || p.prompt || '');
+let TW = 2560, TH = 1440, chunkRows = 8192, headChunks = 8;
+{
+  const re = /\[(target|chunk|heads)\s*[=:]\s*([^\]]+?)\]/gi; let mm;
+  while ((mm = re.exec(clean))) {
+    const k = mm[1].toLowerCase(), v = String(mm[2]).trim();
+    if (k === 'target') { const t = /^(\d+)\s*[x\u00d7]\s*(\d+)$/i.exec(v); if (t) { TW = parseInt(t[1], 10); TH = parseInt(t[2], 10); } }
+    else if (k === 'chunk') { const n = parseInt(v, 10); if (n >= 256 && n <= 65536) chunkRows = n; }
+    else if (k === 'heads') { const n = parseInt(v, 10); if (n >= 1 && n <= 56) headChunks = n; }
+  }
+  clean = clean.replace(re, '').trim();
+}
+if (!clean) clean = 'highly detailed, cinematic';
+let file = String(p.videoFile || '').trim();
+let srcUrl = String(p.videoUrl || p.video || '').trim();
+if (!srcUrl && !file) {
+  const mm = /(https?:\/\/[^\s"'，。]+\.(?:mp4|mov|webm|mkv)[^\s"'，。]*|\/[^\s"'，。]+\.(?:mp4|mov|webm|mkv))/i.exec(clean);
+  if (mm) srcUrl = mm[1];
+}
+if (!file && srcUrl) {
+  let resp;
+  try { resp = await fetch(srcUrl, { credentials: 'same-origin' }); }
+  catch (e) { throw new Error('拉取草稿视频失败: ' + e.message); }
+  if (!resp.ok) throw new Error('拉取草稿视频失败: HTTP ' + resp.status);
+  const blob = await resp.blob();
+  const fn = 'oh3_regen2k_src_' + Date.now() + '.mp4';
+  const fd = new FormData();
+  fd.append('image', blob, fn);
+  fd.append('type', 'input');
+  fd.append('overwrite', 'true');
+  let up;
+  try { up = await (await fetch(base + '/upload/image', { method: 'POST', body: fd })).json(); }
+  catch (e) { throw new Error('上传草稿到 ComfyUI 失败: ' + e.message); }
+  file = (up && up.name) || fn;
+}
+if (!file) throw new Error('2K 精修需要一段草稿视频：请传 params.videoUrl（或把视频 URL / input 文件名写进提示词）');
+const seed = Math.floor(Math.random() * 1e15);
+const g = {};
+g['1'] = { class_type: 'LoadVideo', inputs: { file: file } };
+g['2'] = { class_type: 'GetVideoComponents', inputs: { video: ['1', 0] } };
+g['3'] = { class_type: 'VAELoader', inputs: { vae_name: 'minimax_h3_video_vae_fp16.safetensors' } };
+g['4'] = { class_type: 'VAEEncode', inputs: { pixels: ['2', 0], vae: ['3', 0] } };
+g['5'] = { class_type: 'MinimaxH3LatentUpscaler3D', inputs: {
+  latent: ['4', 0],
+  model_name: 'minimax_h3_latent_upscaler_3d_conv_v1_bf16.safetensors',
+  mode: 'target dimensions', 'mode.width': TW, 'mode.height': TH,
+  align: 32, enable_temporal_chunking: true, force_unload: true, device: 'cuda', precision: 'bf16' } };
+g['6'] = { class_type: 'UNETLoader', inputs: { unet_name: 'minimax_h3_fl2va_int8_convrot.safetensors', weight_dtype: 'default' } };
+g['7'] = { class_type: 'LoraLoaderModelOnly', inputs: { model: ['6', 0],
+  lora_name: 'minimax_h3_open_regenerate_2k_r128_comfyui_bf16.safetensors', strength_model: 1.0 } };
+g['8'] = { class_type: 'MiniMaxLowVRAMAttention', inputs: { model: ['7', 0], head_chunks: headChunks } };
+g['9'] = { class_type: 'MiniMaxH3ActivationChunkT8Advanced', inputs: { model: ['8', 0], mode: 'apply_exp',
+  chunk_rows: chunkRows, block_start: 0, block_end: 49, preserve_short_path: true,
+  expected_width: TW, expected_height: TH, expected_length: 124, expected_single_image_references: 0 } };
+g['10'] = { class_type: 'CLIPLoader', inputs: { clip_name: 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors', type: 'minimax', device: 'default' } };
+g['11'] = { class_type: 'MiniMaxH3ImageToVideo', inputs: { clip: ['10', 0], vae: ['3', 0], prompt: clean,
+  width: TW, height: TH, length: 124 } };
+g['12'] = { class_type: 'LTXVSeparateAVLatent', inputs: { av_latent: ['11', 1] } };
+g['13'] = { class_type: 'LTXVConcatAVLatent', inputs: { video_latent: ['5', 0], audio_latent: ['12', 1] } };
+g['14'] = { class_type: 'BasicGuider', inputs: { model: ['9', 0], conditioning: ['11', 0] } };
+g['15'] = { class_type: 'KSamplerSelect', inputs: { sampler_name: 'euler' } };
+g['16'] = { class_type: 'ManualSigmas', inputs: { sigmas: '0.909375, 0.857143, 0.666667, 0.0' } };
+g['17'] = { class_type: 'RandomNoise', inputs: { noise_seed: seed, control_after_generate: 'fixed' } };
+g['18'] = { class_type: 'SamplerCustomAdvanced', inputs: { noise: ['17', 0], guider: ['14', 0], sampler: ['15', 0],
+  sigmas: ['16', 0], latent_image: ['13', 0] } };
+g['19'] = { class_type: 'LTXVSeparateAVLatent', inputs: { av_latent: ['18', 0] } };
+g['20'] = { class_type: 'VAEDecode', inputs: { samples: ['19', 0], vae: ['3', 0] } };
+g['21'] = { class_type: 'CreateVideo', inputs: { images: ['20', 0], fps: ['2', 2], audio: ['2', 1] } };
+g['22'] = { class_type: 'SaveVideo', inputs: { video: ['21', 0], filename_prefix: 'video/oh3_regen2k', format: 'auto', codec: 'auto' } };
+
+let sub;
+try { sub = await (await fetch(base + '/prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt: g }) })).json(); }
+catch (e) { throw new Error('无法连接 ComfyUI: ' + e.message); }
+const pid = sub && sub.prompt_id;
+if (!pid) { const em = (sub && sub.error && (sub.error.message || sub.error.type)) || JSON.stringify(sub).slice(0, 300); throw new Error('提交失败: ' + em); }
+let entry = null; const deadline = Date.now() + 90 * 60 * 1000;
+while (Date.now() < deadline) {
+  if (signal && signal.aborted) {
+    (async function () { try { const q = await (await fetch(base + '/queue')).json(); const run = ((q && q.queue_running) || []).map(function (x) { return x[1]; }); if (run.indexOf(pid) >= 0) { await fetch(base + '/interrupt', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); } else { await fetch(base + '/queue', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ delete: [pid] }) }); } } catch (e) {} })();
+    throw new DOMException('Aborted', 'AbortError');
+  }
+  try { const hd = await (await fetch(base + '/history/' + pid)).json(); if (hd && hd[pid]) { entry = hd[pid]; break; } } catch (e) {}
+  await new Promise(function (r) { setTimeout(r, 10000); });
+}
+if (!entry) throw new Error('等待 2K 精修超时（90 分钟）');
+const st = (entry.status && entry.status.status_str) || 'unknown';
+if (st !== 'success') {
+  let msg = '精修失败(' + st + ')';
+  const ms = (entry.status && entry.status.messages) || [];
+  for (let i = 0; i < ms.length; i++) { if (ms[i][0] === 'execution_error' && ms[i][1] && ms[i][1].exception_message) { msg = ms[i][1].exception_message.slice(0, 400); break; } }
+  throw new Error(msg);
+}
+const outs = entry.outputs || {}; let url = null;
+for (const k in outs) {
+  const arr = (outs[k] && (outs[k].videos || outs[k].images || outs[k].gifs)) || [];
+  const mp4 = arr.find(function (x) { return /\.(mp4|webm|gif)$/i.test(x.filename); });
+  if (mp4) { url = base + '/view?filename=' + encodeURIComponent(mp4.filename) + '&subfolder=' + encodeURIComponent(mp4.subfolder || '') + '&type=' + encodeURIComponent(mp4.type || 'output'); break; }
+}
+if (!url) throw new Error('ComfyUI 未返回视频');
+return url;
+"""
+
 SCRIPTS = {
     "vllm": VLLM,
     "vllm_lora": VLLM_LORA,
@@ -545,6 +666,7 @@ SCRIPTS = {
     "flux2ref": FLUX2,
     "flux3": FLUX3,
     "sd15": SD15,
+    "regen2k": REGEN2K,
 }
 
 REG = r"""
@@ -600,6 +722,8 @@ window.runWorkflowsImport = function () {
   upsert(H3, "SeedVR2图片超分·7B", "image", S.sr_img);
   upsert(H3, "SeedVR2视频超分·3B", "video", S.sr_vid);
   upsert(H3, "SeedVR2视频超分·7B", "video", S.sr_vid);
+  // Open-H3 Regenerate 2K 精修（非官方）：H3 768P 草稿 → 2560x1440，124 帧约 18 分钟
+  upsert(H3, "H3 2K 精修", "video", S.regen2k);
   // 3) 图像渠道：Qwen-Image 2.1
   var Q = getCh("comfyui-qwen21", "ComfyUI Qwen-Image 2.1", IMGURL);
   upsert(Q, "qwen21 文生图", "image", S.qw21);
@@ -647,6 +771,49 @@ window.__normalizeChannels = function () {
   }
   if (changed) { if (window.__cfgDualWrite) window.__cfgDualWrite(cur); else localStorage.setItem(KEY, JSON.stringify(cur)); }
 };
+// 渠道清理：删掉用不了的默认 GPT 渠道 + 合并同脚本的重复模型（qwen21 的「图像编辑」与「文生图」是同一段脚本）
+window.__icCleanup = function () {
+  var KEY = "infinite-canvas:ai_config_store";
+  var cur; try { cur = JSON.parse(localStorage.getItem(KEY) || "{}"); } catch (e) { return null; }
+  cur.state = cur.state || {}; cur.state.config = cur.state.config || {};
+  var cfg = cur.state.config;
+  var chans = cfg.channels = cfg.channels || [];
+  var out = { channels: [], models: [] };
+  // 1) 默认渠道（id=default，gpt-image-2 / grok-imagine-video / gpt-5.5 / gpt-4o-mini-tts）：没配 key 纯噪音
+  for (var i = chans.length - 1; i >= 0; i--) {
+    var c0 = chans[i];
+    if (!c0) { chans.splice(i, 1); continue; }
+    if (c0.id === "default" || c0.name === "默认渠道" || c0.name === "Default channel") { out.channels.push(c0.name); chans.splice(i, 1); }
+  }
+  // 2) 重复模型：qwen21 / qwen21-turbo 的「图像编辑」与「文生图」指向同一脚本（脚本只对「抠图」按名字分支）
+  var DUP = { "qwen21 图像编辑": 1, "qwen21-turbo 图像编辑": 1 };
+  if (chans.length) chans.forEach(function (c) {
+    if (!c || !Array.isArray(c.models)) return;
+    c.models = c.models.filter(function (m) {
+      if (m && DUP[m.name]) { out.models.push(m.name); return false; }
+      return true;
+    });
+  });
+  // 3) 重建模型索引 + 修正失效的默认模型指针
+  var alive = {};
+  if (chans.length) chans.forEach(function (c) { (c.models || []).forEach(function (m) { alive[c.id + "::" + m.name] = 1; }); });
+  var keep = [];
+  var push = function (k) { if (alive[k] && keep.indexOf(k) < 0) keep.push(k); };
+  if (Array.isArray(cfg.models)) cfg.models.forEach(function (v) { if (typeof v === "string") push(v); });
+  if (chans.length) chans.forEach(function (c) { (c.models || []).forEach(function (m) { push(c.id + "::" + m.name); }); });
+  cfg.models = keep;
+  function firstOf(cap) {
+    for (var i = 0; i < chans.length; i++) {
+      var ms = chans[i].models || [];
+      for (var j = 0; j < ms.length; j++) { if (ms[j].capability === cap) return chans[i].id + "::" + ms[j].name; }
+    }
+    return "";
+  }
+  var CAP = { model: "image", imageModel: "image", videoModel: "video", textModel: "text", audioModel: "audio" };
+  for (var k in CAP) { if (!alive[cfg[k]]) cfg[k] = firstOf(CAP[k]); }
+  if (window.__cfgDualWrite) window.__cfgDualWrite(cur); else localStorage.setItem(KEY, JSON.stringify(cur));
+  return out;
+};
 (function () {
   function wrap(fnName, after) {
     var orig = window[fnName];
@@ -655,8 +822,8 @@ window.__normalizeChannels = function () {
       w.__wfWrapped = true; window[fnName] = w;
     }
   }
-  wrap("runExtraImport", function () { window.runWorkflowsImport(); window.__normalizeChannels(); });
-  wrap("runImageChannelsImport", function () { window.__normalizeChannels(); });
+  wrap("runExtraImport", function () { window.runWorkflowsImport(); window.__normalizeChannels(); window.__icCleanup(); });
+  wrap("runImageChannelsImport", function () { window.__normalizeChannels(); window.__icCleanup(); });
 })();
 """
 

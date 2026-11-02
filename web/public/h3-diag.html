@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>画布插件诊断与修复</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background:#0f1115; color:#d8dce4; font-family:"Segoe UI","Microsoft YaHei",sans-serif; padding:28px 18px 60px; }
+  .wrap { max-width: 960px; margin: 0 auto; }
+  h1 { font-size: 22px; margin-bottom: 6px; color:#7ab8ff; }
+  .sub { color:#8b93a3; font-size:13px; margin-bottom:22px; line-height:1.7; }
+  .card { background:#171a21; border:1px solid #262b36; border-radius:10px; padding:16px 18px; margin-bottom:16px; }
+  .card h2 { font-size:15px; color:#aeb7c6; margin-bottom:10px; }
+  .card h2 .no { display:inline-block; background:#2b304a; color:#7ab8ff; border-radius:4px; padding:0 6px; margin-right:6px; font-size:12px; }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  th,td { text-align:left; padding:6px 8px; border-bottom:1px solid #232833; word-break:break-all; }
+  th { color:#8b93a3; font-weight:600; }
+  td.ok { color:#5ad19b; } td.bad { color:#ff7b72; } td.warn { color:#e3b341; }
+  button { background:#2563eb; color:#fff; border:none; border-radius:7px; padding:9px 18px; font-size:13.5px; cursor:pointer; margin-right:10px; margin-top:8px; }
+  button:hover { background:#1d4fd8; }
+  button:disabled { background:#333a48; color:#7b8494; cursor:not-allowed; }
+  button.green { background:#1f8f55; } button.green:hover { background:#187a47; }
+  button.gray { background:#333a48; } button.gray:hover { background:#3d4658; }
+  select { background:#1d222c; color:#d8dce4; border:1px solid #303747; border-radius:6px; padding:8px 10px; font-size:13px; max-width:100%; }
+  pre { background:#12141a; border:1px solid #232833; border-radius:7px; padding:10px 12px; font-size:12px; line-height:1.55; overflow-x:auto; white-space:pre-wrap; word-break:break-all; color:#a8b3c5; margin-top:8px; }
+  .badge { display:inline-block; border-radius:4px; padding:1px 7px; font-size:11.5px; margin-right:6px; }
+  .b-ok { background:#12331f; color:#5ad19b; } .b-bad { background:#3a1715; color:#ff7b72; } .b-warn { background:#33290e; color:#e3b341; }
+  .hint { font-size:12px; color:#79839a; margin-top:8px; line-height:1.7; }
+  .row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-top:6px; }
+  .spin { display:inline-block; width:13px; height:13px; border:2px solid #3b4457; border-top-color:#7ab8ff; border-radius:50%; animation:sp 0.8s linear infinite; vertical-align:-2px; margin-right:6px; }
+  @keyframes sp { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>画布插件诊断与修复</h1>
+  <div class="sub">
+    请在<b>你平时使用的浏览器</b>里打开本页（就是出现 openai_error 的那个浏览器）。本页只读取本机浏览器的画布配置，不会上传任何数据。<br>
+    依次执行：① 看下方自动检测结果 → ② 点「测试所有渠道」→ ③ 按「一键修复」区操作 → ④ 刷新画布页面。
+  </div>
+
+  <div class="card">
+    <h2>① 自动检测：插件版本 与 渠道配置</h2>
+    <div id="autoBox"><span class="spin"></span>检测中…</div>
+    <div class="hint" id="plugHint"></div>
+  </div>
+
+  <div class="card">
+    <h2>② 渠道直调测试（模拟插件的 /v1/chat/completions 请求）</h2>
+    <div class="row">
+      <button id="btnTest" onclick="runTests()">测试所有渠道</button>
+      <span id="testStat" class="hint"></span>
+    </div>
+    <div id="testBox"></div>
+    <div class="hint">说明：对每个渠道的模型发送一条短对话请求，检测该渠道能否真正提供文本生成服务。ComfyUI 类渠道（图/视频）会显示 404，属正常——它们不是文本服务。</div>
+  </div>
+
+  <div class="card">
+    <h2>③ 一键修复</h2>
+    <div class="row">
+      <button class="green" onclick="doUpdatePlug()">更新插件到最新版</button>
+      <span id="plugStat" class="hint"></span>
+    </div>
+    <div class="hint">把插件强制刷新为服务器上的最新版本（修复"生成提示词直调"的两处 BUG）。</div>
+    <div class="row" style="margin-top:14px">
+      <span style="font-size:13px;color:#aeb7c6">默认文本模型：</span>
+      <select id="tmSel" style="max-width:520px"><option value="">（先执行②测试，从可用项中选择）</option></select>
+      <button onclick="doSaveTm()">保存</button>
+      <span id="tmStat" class="hint"></span>
+    </div>
+    <div class="hint">作用：提示词优化节点未单独选择模型时，使用这里的默认文本模型。<b>若此下拉为空或没有可用项，说明你的渠道里没有任何可用的文本服务——这就是 openai_error 的根源</b>（文本生成必须指向一个 OpenAI 兼容的对话服务，而不是 ComfyUI）。</div>
+  </div>
+
+  <div class="card">
+    <h2>④ 操作日志</h2>
+    <pre id="log">等待操作…</pre>
+  </div>
+</div>
+
+<script>
+var PLUG_KEY = "infinite-canvas:plugin_store";
+var CFG_KEY = "infinite-canvas:ai_config_store";
+var LOG = [];
+function log(s){ LOG.push("[" + new Date().toTimeString().slice(0,8) + "] " + s);
+  document.getElementById("log").textContent = LOG.join("\n"); }
+
+function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,function(c){
+  return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]; }); }
+
+/* ---------- 数据读取 ---------- */
+function getCfgRaw(){ try{ return JSON.parse(localStorage.getItem(CFG_KEY)||"{}"); }catch(e){ return {}; } }
+function getConfig(){ var j=getCfgRaw(); return (j.state&&j.state.config)||j.config||{}; }
+
+function idbOpen(){ return new Promise(function(res,rej){
+  var rq=indexedDB.open("infinite-canvas");
+  rq.onupgradeneeded=function(){ try{ rq.result.createObjectStore("app_state"); }catch(e){} };
+  rq.onsuccess=function(){ res(rq.result); }; rq.onerror=function(){ rej(rq.error); }; }); }
+function idbGet(db,k){ return new Promise(function(res,rej){
+  var r=db.transaction("app_state","readonly").objectStore("app_state").get(k);
+  r.onsuccess=function(){ res(r.result); }; r.onerror=function(){ rej(r.error); }; }); }
+function idbPut(db,k,v){ return new Promise(function(res,rej){
+  var tx=db.transaction("app_state","readwrite");
+  tx.objectStore("app_state").put(v,k);
+  tx.oncomplete=function(){ res(); }; tx.onerror=function(){ rej(tx.error); }; }); }
+
+/* ---------- ① 自动检测 ---------- */
+async function autoCheck(){
+  var box=document.getElementById("autoBox");
+  var html="";
+  // 插件
+  var plug=null, plugErr="";
+  try{
+    var db=await idbOpen(); var raw=await idbGet(db,PLUG_KEY); db.close();
+    var j=(typeof raw==="string")?JSON.parse(raw):raw;
+    var list=(j&&j.state&&j.state.plugins)||[];
+    for(var i=0;i<list.length;i++){ if(list[i]&&list[i].id==="prompt-optimizer") plug=list[i]; }
+  }catch(e){ plugErr=String(e&&e.message||e); }
+  if(plug){
+    var s=String(plug.source||"");
+    var a1=s.indexOf("await __cfgFix()")>=0;
+    var a2=s.indexOf("cf.textModel||")>=0;
+    if(a1&&a2){
+      html+="<div><span class='badge b-ok'>正常</span>插件 <b>prompt-optimizer</b> 已是最新修复版（v"+esc(plug.version||"?")+"，"+s.length+" 字符，已启用）</div>";
+      document.getElementById("plugHint").textContent="插件无需更新。若仍报错，请重点看②的渠道测试结果。";
+    }else{
+      html+="<div><span class='badge b-bad'>旧版</span>插件 <b>prompt-optimizer</b> 是旧版本（v"+esc(plug.version||"?")+"，"+s.length+" 字符，不含两处直调修复）</div>";
+      document.getElementById("plugHint").textContent="请点③的「更新插件到最新版」。";
+    }
+  }else{
+    html+="<div><span class='badge b-bad'>未安装</span>本浏览器未检测到 prompt-optimizer 插件"+(plugErr?"（读取失败："+esc(plugErr)+"）":"")+"</div>";
+    document.getElementById("plugHint").textContent="请先在画布中安装插件，或点③的「更新插件到最新版」直接安装。";
+  }
+  // 渠道
+  var c=getConfig();
+  var chans=c.channels||[];
+  html+="<div style='margin-top:12px'><span class='badge "+(c.textModel?"b-ok":"b-warn")+"'>配置</span>默认文本模型：<b>"+esc(c.textModel||"（未设置！）")+"</b></div>";
+  html+="<div style='margin-top:8px'><table><tr><th>渠道</th><th>Base URL</th><th>格式</th><th>模型数</th></tr>";
+  for(var k=0;k<chans.length;k++){
+    var ch=chans[k]||{};
+    html+="<tr><td>"+esc(ch.name||ch.id)+"</td><td>"+esc(ch.baseUrl||"")+"</td><td>"+esc(ch.apiFormat||"openai")+"</td><td>"+((ch.models||[]).length)+"</td></tr>";
+  }
+  html+="</table></div>";
+  box.innerHTML=html;
+  fillTmSelect();
+}
+
+/* ---------- ② 渠道测试 ---------- */
+function chanUrl(base){
+  var b=String(base||"").trim().replace(/\/+$/,"");
+  if(!b.toLowerCase().endsWith("/v1")) b+="/v1";
+  return b+"/chat/completions";
+}
+async function testOne(ch, modelName){
+  var url=chanUrl(ch.baseUrl);
+  var hdrs={"Content-Type":"application/json"};
+  var key=ch.apiKey||ch.key||"";
+  if(key) hdrs["Authorization"]="Bearer "+key;
+  var t0=Date.now();
+  try{
+    var ctl=(typeof AbortSignal!=="undefined"&&AbortSignal.timeout)?AbortSignal.timeout(15000):null;
+    var r=await fetch(url,{method:"POST",headers:hdrs,
+      body:JSON.stringify({model:modelName,messages:[{role:"user",content:"只回复两个字：成功"}],stream:false,max_tokens:200}),
+      signal:ctl});
+    var txt=await r.text();
+    return {ok:r.ok,status:r.status,ms:Date.now()-t0,body:txt.slice(0,240)};
+  }catch(e){
+    return {ok:false,status:0,ms:Date.now()-t0,body:"fetch 失败: "+String(e&&e.message||e)+"（多为 CORS 跨域或网络不通）"};
+  }
+}
+var AVAIL=[]; // 可用项 [{label, mid}]
+async function runTests(){
+  var btn=document.getElementById("btnTest"); btn.disabled=true;
+  var stat=document.getElementById("testStat");
+  var box=document.getElementById("testBox");
+  AVAIL=[];
+  var c=getConfig(); var chans=c.channels||[];
+  if(!chans.length){ box.innerHTML="<div class='hint'>未检测到任何渠道配置。</div>"; btn.disabled=false; return; }
+  box.innerHTML="<div class='hint'><span class='spin'></span>正在逐个渠道测试…</div>";
+  var rows="";
+  var total=0, okN=0;
+  for(var i=0;i<chans.length;i++){
+    var ch=chans[i]||{};
+    var ms=(ch.models||[]).slice(0,4);
+    if(!ms.length){
+      rows+="<tr><td>"+esc(ch.name||ch.id)+"</td><td>（无模型）</td><td class='warn'>跳过</td><td>-</td></tr>";
+      continue;
+    }
+    for(var k=0;k<ms.length;k++){
+      var mn=ms[k]&&ms[k].name||"";
+      total++;
+      stat.innerHTML="<span class='spin'></span>测试中 "+total+"："+esc(ch.name)+" / "+esc(mn);
+      var r=await testOne(ch,mn);
+      var mid=ch.id+"::"+mn;
+      if(r.ok){
+        okN++; AVAIL.push({label:(ch.name||ch.id)+" · "+mn, mid:mid});
+        rows+="<tr><td>"+esc(ch.name||ch.id)+"</td><td>"+esc(mn)+"</td><td class='ok'>可用 "+r.status+" ("+r.ms+"ms)</td><td>"+esc(r.body.slice(0,120))+"</td></tr>";
+      }else{
+        rows+="<tr><td>"+esc(ch.name||ch.id)+"</td><td>"+esc(mn)+"</td><td class='bad'>失败 "+(r.status||"-")+" ("+r.ms+"ms)</td><td>"+esc(r.body.slice(0,150))+"</td></tr>";
+      }
+    }
+  }
+  stat.textContent="完成：共测 "+total+" 个模型，可用 "+okN+" 个";
+  box.innerHTML="<table><tr><th>渠道</th><th>模型</th><th>结果</th><th>响应摘要</th></tr>"+rows+"</table>";
+  fillTmSelect();
+  log("渠道测试完成：共 "+total+"，可用 "+okN);
+  btn.disabled=false;
+}
+
+/* ---------- ③ 修复 ---------- */
+function fillTmSelect(){
+  var sel=document.getElementById("tmSel");
+  var cur=getConfig().textModel||"";
+  var html="";
+  if(AVAIL.length){
+    for(var i=0;i<AVAIL.length;i++){
+      html+="<option value=\""+esc(AVAIL[i].mid)+"\""+(AVAIL[i].mid===cur?" selected":"")+">"+esc(AVAIL[i].label)+"</option>";
+    }
+  }else{
+    var c=getConfig(); var chans=c.channels||[];
+    for(var a=0;a<chans.length;a++){
+      var ms=(chans[a].models||[]);
+      for(var b=0;b<ms.length;b++){
+        var mid=chans[a].id+"::"+(ms[b].name||"");
+        html+="<option value=\""+esc(mid)+"\""+(mid===cur?" selected":"")+">"+esc((chans[a].name||chans[a].id)+" · "+ms[b].name+"（未测试）")+"</option>";
+      }
+    }
+    if(!html) html="<option value=\"\">（没有可用模型——需要先添加一个 OpenAI 兼容文本渠道）</option>";
+  }
+  sel.innerHTML=html;
+}
+function doSaveTm(){
+  var sel=document.getElementById("tmSel");
+  var v=sel.value;
+  if(!v){ document.getElementById("tmStat").textContent="没有可保存的模型。"; return; }
+  try{
+    var j=getCfgRaw();
+    if(!j.state) j.state={};
+    if(!j.state.config) j.state.config={};
+    j.state.config.textModel=v;
+    localStorage.setItem(CFG_KEY,JSON.stringify(j));
+    document.getElementById("tmStat").textContent="已保存："+v;
+    log("已设置默认文本模型 = "+v);
+    autoCheck();
+  }catch(e){ document.getElementById("tmStat").textContent="保存失败："+String(e&&e.message||e); }
+}
+async function doUpdatePlug(){
+  var st=document.getElementById("plugStat");
+  st.innerHTML="<span class='spin'></span>更新中…";
+  try{
+    var r=await fetch("/plugins/prompt-optimizer.js",{cache:"no-store"});
+    if(!r.ok) throw new Error("拉取失败 HTTP "+r.status);
+    var src=await r.text();
+    var u=URL.createObjectURL(new Blob([src],{type:"text/javascript"}));
+    var mod; try{ mod=await import(u); } finally{ URL.revokeObjectURL(u); }
+    var plug=mod&&(mod.default||mod.plugin);
+    if(!plug||!plug.id||!Array.isArray(plug.nodes)||!plug.nodes.length) throw new Error("插件清单校验失败（无效导出）");
+    var db=await idbOpen(); var raw=await idbGet(db,PLUG_KEY);
+    var j=(typeof raw==="string")?JSON.parse(raw):raw;
+    var stt=(j&&j.state)||{};
+    var list=Array.isArray(stt.plugins)?stt.plugins.slice():[];
+    var entry={id:plug.id,name:plug.name||plug.id,version:plug.version||"0.0.0",
+      description:plug.description||"",url:"/plugins/prompt-optimizer.js",source:src,enabled:true,
+      installedAt:new Date().toISOString()};
+    var idx=-1;
+    for(var i=0;i<list.length;i++){ if(list[i]&&list[i].id===plug.id){ idx=i; break; } }
+    if(idx>=0){ entry.installedAt=list[idx].installedAt||entry.installedAt; list[idx]=Object.assign({},list[idx],entry); }
+    else list.unshift(entry);
+    var payload=JSON.stringify({state:Object.assign({},stt,{plugins:list}),version:(j&&typeof j.version==="number")?j.version:0});
+    await idbPut(db,PLUG_KEY,payload); db.close();
+    st.innerHTML="<span class='badge b-ok'>完成</span>已写入 v"+esc(entry.version)+"（"+src.length+" 字符）";
+    log("插件已更新：v"+entry.version+"，"+src.length+" 字符");
+    autoCheck();
+  }catch(e){
+    st.innerHTML="<span class='badge b-bad'>失败</span>"+esc(String(e&&e.message||e));
+    log("插件更新失败："+String(e&&e.message||e));
+  }
+}
+
+/* ---------- 启动 ---------- */
+log("诊断页就绪，开始自动检测…");
+autoCheck().then(function(){ log("自动检测完成。下一步：点「测试所有渠道」。"); })
+  .catch(function(e){ log("自动检测出错："+String(e&&e.message||e)); });
+</script>
+</body>
+</html>
